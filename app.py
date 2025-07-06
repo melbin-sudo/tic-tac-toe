@@ -11,14 +11,17 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-# Fix for Render deployment
+# Fix for deployment issues - Updated configuration
 socketio = SocketIO(
     app, 
     cors_allowed_origins="*", 
-    logger=True, 
-    engineio_logger=True,
-    async_mode='threading',  # Important for Render
-    transports=['websocket', 'polling']  # Allow fallback to polling
+    logger=False,  # Disable socketio logging to prevent conflicts
+    engineio_logger=False,  # Disable engineio logging
+    async_mode='threading',
+    transports=['websocket', 'polling'],
+    ping_timeout=60,
+    ping_interval=25,
+    max_http_buffer_size=1000000
 )
 
 # Store connected clients
@@ -230,15 +233,17 @@ HTML_TEMPLATE = '''
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
     <script>
-        // Initialize socket connection with proper configuration for Render
+        // Initialize socket connection with improved configuration
         const socket = io({
             transports: ['websocket', 'polling'],
-            upgrade: true,
-            rememberUpgrade: true,
-            timeout: 20000,
+            upgrade: false,  // Disable upgrade to prevent handshake issues
+            rememberUpgrade: false,
+            timeout: 30000,
             reconnection: true,
-            reconnectionAttempts: 5,
-            reconnectionDelay: 1000
+            reconnectionAttempts: 3,
+            reconnectionDelay: 2000,
+            reconnectionDelayMax: 5000,
+            forceNew: true
         });
         
         const board = document.getElementById("board");
@@ -420,9 +425,7 @@ HTML_TEMPLATE = '''
                 iceServers: [
                     { urls: "stun:stun.l.google.com:19302" },
                     { urls: "stun:stun1.l.google.com:19302" },
-                    { urls: "stun:stun2.l.google.com:19302" },
-                    { urls: "stun:stun3.l.google.com:19302" },
-                    { urls: "stun:stun4.l.google.com:19302" }
+                    { urls: "stun:stun2.l.google.com:19302" }
                 ],
                 iceCandidatePoolSize: 10
             });
@@ -459,14 +462,6 @@ HTML_TEMPLATE = '''
                     connectionStatus.textContent = "Connection failed";
                     connectionStatus.style.color = '#ff6b6b';
                 }
-            };
-            
-            peerConnection.oniceconnectionstatechange = () => {
-                log(`ICE connection state: ${peerConnection.iceConnectionState}`);
-            };
-            
-            peerConnection.onicegatheringstatechange = () => {
-                log(`ICE gathering state: ${peerConnection.iceGatheringState}`);
             };
         }
         
@@ -694,7 +689,10 @@ def health():
 @socketio.on("connect")
 def handle_connect():
     logger.info(f"Client connected: {request.sid}")
-    emit("connected", {"sid": request.sid})
+    try:
+        emit("connected", {"sid": request.sid})
+    except Exception as e:
+        logger.error(f"Error sending connected event: {e}")
 
 @socketio.on("disconnect")
 def handle_disconnect():
@@ -708,29 +706,48 @@ def handle_disconnect():
 @socketio.on("offer")
 def handle_offer(data):
     logger.info(f"Received offer from {data['id']}")
-    clients[data["id"]] = request.sid
-    # Send offer to all other clients except sender
-    emit("offer", data, broadcast=True, include_self=False)
+    try:
+        clients[data["id"]] = request.sid
+        # Send offer to all other clients except sender
+        emit("offer", data, broadcast=True, include_self=False)
+    except Exception as e:
+        logger.error(f"Error handling offer: {e}")
 
 @socketio.on("answer")
 def handle_answer(data):
     logger.info(f"Received answer from {data['id']} for target {data.get('target_id', 'unknown')}")
-    # Send answer to the specific target client
-    target_id = data.get('target_id')
-    if target_id and target_id in clients:
-        emit("answer", data, room=clients[target_id])
-    else:
-        # Fallback: broadcast to all except sender
-        emit("answer", data, broadcast=True, include_self=False)
+    try:
+        # Send answer to the specific target client
+        target_id = data.get('target_id')
+        if target_id and target_id in clients:
+            emit("answer", data, room=clients[target_id])
+        else:
+            # Fallback: broadcast to all except sender
+            emit("answer", data, broadcast=True, include_self=False)
+    except Exception as e:
+        logger.error(f"Error handling answer: {e}")
 
 @socketio.on("candidate")
 def handle_candidate(data):
     logger.info(f"Received ICE candidate from {data.get('id', 'unknown')}")
-    # Send candidate to all other clients except sender
-    emit("candidate", data, broadcast=True, include_self=False)
+    try:
+        # Send candidate to all other clients except sender
+        emit("candidate", data, broadcast=True, include_self=False)
+    except Exception as e:
+        logger.error(f"Error handling candidate: {e}")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     print(f"Starting signaling server on port {port}")
     print("For local access: http://localhost:5000")
-    socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
+    
+    # Updated run configuration for better stability
+    socketio.run(
+        app, 
+        host="0.0.0.0", 
+        port=port, 
+        debug=False, 
+        allow_unsafe_werkzeug=True,
+        use_reloader=False,
+        log_output=False
+    )
