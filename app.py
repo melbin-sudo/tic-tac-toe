@@ -2,6 +2,7 @@ from flask import Flask, request, render_template_string
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
 import logging
+import os
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -9,12 +10,21 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=True)
+
+# Fix for Render deployment
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    logger=True, 
+    engineio_logger=True,
+    async_mode='threading',  # Important for Render
+    transports=['websocket', 'polling']  # Allow fallback to polling
+)
 
 # Store connected clients
 clients = {}
 
-# HTML template as string
+# HTML template as string - Updated with dynamic host detection
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -220,8 +230,16 @@ HTML_TEMPLATE = '''
     </div>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
     <script>
-        // Get the current host dynamically
-        const socket = io();
+        // Initialize socket connection with proper configuration for Render
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            upgrade: true,
+            rememberUpgrade: true,
+            timeout: 20000,
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000
+        });
         
         const board = document.getElementById("board");
         const gameStatus = document.getElementById("game-status");
@@ -395,14 +413,18 @@ HTML_TEMPLATE = '''
             joinBtn.disabled = true;
         }
         
-        // Create peer connection
+        // Create peer connection with more robust ICE servers
         function createPeerConnection() {
             log("Creating peer connection");
             peerConnection = new RTCPeerConnection({
                 iceServers: [
                     { urls: "stun:stun.l.google.com:19302" },
-                    { urls: "stun:stun1.l.google.com:19302" }
-                ]
+                    { urls: "stun:stun1.l.google.com:19302" },
+                    { urls: "stun:stun2.l.google.com:19302" },
+                    { urls: "stun:stun3.l.google.com:19302" },
+                    { urls: "stun:stun4.l.google.com:19302" }
+                ],
+                iceCandidatePoolSize: 10
             });
             
             peerConnection.onicecandidate = (event) => {
@@ -543,7 +565,7 @@ HTML_TEMPLATE = '''
             pendingCandidates = [];
         }
         
-        // Socket event handlers
+        // Socket event handlers with better error handling
         socket.on("connect", () => {
             log("Connected to signaling server");
             connectionStatus.textContent = "Connected to server";
@@ -551,9 +573,15 @@ HTML_TEMPLATE = '''
             playerIdSpan.textContent = myId;
         });
         
-        socket.on("disconnect", () => {
-            log("Disconnected from signaling server");
-            connectionStatus.textContent = "Disconnected from server";
+        socket.on("disconnect", (reason) => {
+            log(`Disconnected from signaling server: ${reason}`);
+            connectionStatus.textContent = `Disconnected: ${reason}`;
+            connectionStatus.style.color = '#ff6b6b';
+        });
+        
+        socket.on("connect_error", (error) => {
+            log(`Connection error: ${error.message}`);
+            connectionStatus.textContent = `Connection error: ${error.message}`;
             connectionStatus.style.color = '#ff6b6b';
         });
         
@@ -659,6 +687,10 @@ def index():
 def status():
     return f"Signaling server running. Connected clients: {len(clients)}"
 
+@app.route("/health")
+def health():
+    return {"status": "healthy", "clients": len(clients)}
+
 @socketio.on("connect")
 def handle_connect():
     logger.info(f"Client connected: {request.sid}")
@@ -698,7 +730,7 @@ def handle_candidate(data):
     emit("candidate", data, broadcast=True, include_self=False)
 
 if __name__ == "__main__":
-    print("Starting signaling server on http://localhost:5000")
-    print("Access the game at: http://localhost:5000")
-    print("For mobile access, use your computer's IP address")
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Starting signaling server on port {port}")
+    print("For local access: http://localhost:5000")
+    socketio.run(app, host="0.0.0.0", port=port, debug=False)
